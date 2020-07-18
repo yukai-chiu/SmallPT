@@ -7,6 +7,8 @@
 std:: default_random_engine generator;
 std::uniform_real_distribution<double> distr(0.0,1.0);
 
+
+
 double erand48(int X){
     return distr(generator);
 }
@@ -62,6 +64,9 @@ struct Sphere{
         return (t=b-det) > eps ? t : ((t=b+det) > eps ? t : 0); // get the smallest positive t, the closer hit point to the ray origin
         
     }
+    bool isLight() const{
+        return emis.x<=0 && emis.y<=0 && emis.z<=0;
+    }
 };
 //define scene: radius, position, emission, color, material
 Sphere spheres[] = {
@@ -94,7 +99,7 @@ inline bool intersect(const Ray &r, double &t, int &id){
     return t < inf;
 }
 
-Vector3 radiance(const Ray &r, int depth, unsigned short * Xi){
+Vector3 radiance(const Ray &r, int depth, unsigned short * Xi, int E=1){
     double t;
     int id=0;
     if(!intersect(r, t, id)) return Vector3(); //if the ray miss, return black as color
@@ -105,11 +110,78 @@ Vector3 radiance(const Ray &r, int depth, unsigned short * Xi){
     Vector3 intersect_pt = r.origin + r.dir*t;
     Vector3 n = (intersect_pt - obj.pos).norm();
     Vector3 normal = n.dot(r.dir) < 0 ? n : n*-1;
-    Vector3 obj_color = obj.color;
+    Vector3 f = obj.color;
+
+    //russian roulette
+    double p = f.x>f.y && f.x>f.z ? f.x : f.y>f.z ? f.y : f.z;
+    if(++depth>5||!p)
+    {
+        if(erand48(1)<p)
+            f = f*(1/p);
+        else 
+            return obj.emis*E;
+    }
+
+    if(obj.refl == DIFF){  //Ideal DIFFUSE reflection
+        double r1 = 2*M_PI*erand48(1); //get random angle
+        double r2 = erand48(1), r2s=sqrt(r2); 
+        Vector3 w = normal;
+        Vector3 u = ((fabs(w.x) > .1? Vector3(0,1):Vector3(1)).cross(w)).norm();//u is perpendicular to w
+        Vector3 v = w.cross(u); //v is perpendicular to w and u
+        Vector3 d = (u*cos(r1)*r2s + v*sin(r1)*r2s + w*sqrt(1-r2)).norm();
+
+        //Loop over all lights(explicit lighting)
+        Vector3 e;
+        for(int i=0;i<numSpheres;i++){
+            const Sphere &s = spheres[i];
+            if(!s.isLight()) continue; //skip the sphere that is not light
+
+            //Create random direction 
+            Vector3 sw = s.pos - intersect_pt;
+            Vector3 su = ((fabs(sw.x) > .1? Vector3(0,1):Vector3(1)).cross(sw)).norm();
+            Vector3 sv = sw.cross(su);
+            //TODO: do the math again
+            double cos_a_max = sqrt(1-s.rad*s.rad/(intersect_pt-s.pos).dot(intersect_pt-s.pos));
+            double eps1 = erand48(1), eps2 =erand48(1);
+            double cos_a = 1-eps1+eps1*cos_a_max;
+            double sin_a = sqrt(1-cos_a*cos_a);
+            double phi = 2*M_PI*eps2;
+            Vector3 l = su*cos(phi)*sin_a + sv*sin(phi)*sin_a + sw*cos_a;
+            l.norm();
+
+            //shoot shadow ray
+            if(intersect(Ray(intersect_pt,l), t, id) && id==i){
+                double omega = 2*M_PI*(1-cos_a_max);
+                e = e +f.mul(s.emis*l.dot(normal)*omega)*M_1_PI;
+            }
+        }
+        return obj.emis*E + e + f.mul(radiance(Ray(intersect_pt, d), depth, Xi, 0));
+    }
+    else if(obj.refl == SPEC){
+        return obj.emis + f.mul(radiance(Ray(intersect_pt,r.dir-n*2*n.dot(r.dir)), depth, Xi));
+    }
+
+    Ray reflRay(intersect_pt, r.dir-n*2*n.dot(r.dir));
+    bool into = n.dot(normal) > 0;
+    double nc = 1, nt = 1.5;
+    double nnt = into?nc/nt:nt/nc;
+    double ddn = r.dir.dot(normal), cos2t; 
+
+    if((cos2t = 1-nnt*nnt*(1-ddn*ddn))<0)
+        return obj.emis + f.mul(radiance(reflRay, depth, Xi));
+    Vector3 tdir = (r.dir * nnt - n*((into?1:-1)*(ddn*nnt+sqrt(cos2t)))).norm();
+    double a=nt-nc, b=nt+nc, R0=a*a/(b*b), c= 1-(into?-ddn:tdir.dot(n));
+    double Re = R0+(1-R0)*c*c*c*c*c, Tr=1-Re, P=.25+.5*Re, RP=Re/P, TP=Tr/(1-P);
+    return obj.emis + f.mul(depth>2 ? (erand48(1)<P ?
+    radiance(reflRay, depth, Xi)*RP: radiance(Ray(intersect_pt, tdir), depth, Xi)*TP):
+    radiance(reflRay, depth, Xi)* Re+radiance(Ray(intersect_pt, tdir), depth, Xi)*Tr);
 
 }
 
+
 int main(int argc, char *argv[]){
+    //const double M_PI_ = 3.1415926535;
+    //const double M_1_PI = 1.0/M_PI;
     //Setup image
     int width=512, height=384;
     int samples = argc==2 ? atoi(argv[1])/4 : 1;
